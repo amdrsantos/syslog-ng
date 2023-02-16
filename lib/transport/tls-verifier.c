@@ -198,3 +198,11 @@ tls_verify_certificate_name(X509 *cert, const gchar *host_name)
 
   return result;
 }
+
+gboolean
+tls_verify_certificate_externally(X509 *cert, const gchar *custom_peer_certificate_validation)
+{
+  gboolean result = FALSE;
+  msg_notice("Triggering external peer certificate validation - ASANTOS");
+  return result;
+}

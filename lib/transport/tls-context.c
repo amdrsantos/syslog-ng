@@ -804,6 +804,12 @@ tls_context_set_ocsp_stapling_verify(TLSContext *self, gboolean ocsp_stapling_ve
   self->ocsp_stapling_verify = ocsp_stapling_verify;
 }
 
+void
+tls_context_set_custom_peer_certificate_validation(TLSContext *self, const gchar *custom_peer_certificate_validation)
+{
+    self->custom_peer_certificate_validation = g_strdup(custom_peer_certificate_validation);
+}
+
 /* NOTE: location is a string description where this tls context was defined, e.g. the location in the config */
 TLSContext *
 tls_context_new(TLSMode mode, const gchar *location)

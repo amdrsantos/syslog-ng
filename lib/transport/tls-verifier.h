@@ -43,6 +43,7 @@ TLSVerifier *tls_verifier_ref(TLSVerifier *self);
 void tls_verifier_unref(TLSVerifier *self);
 
 gboolean tls_verify_certificate_name(X509 *cert, const gchar *hostname);
+gboolean tls_verify_certificate_externally(X509 *cert, const gchar *custom_peer_certificate_validation);
 
 
 #endif
