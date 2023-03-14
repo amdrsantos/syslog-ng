@@ -24,6 +24,10 @@
 #include "messages.h"
 #include "compat/openssl_support.h"
 #include <openssl/x509v3.h>
+#include <sys/un.h>
+#include <unistd.h>
+#include <sys/select.h>
+
 
 /* TLSVerifier */
 
@@ -199,10 +203,171 @@ tls_verify_certificate_name(X509 *cert, const gchar *host_name)
   return result;
 }
 
-gboolean
-tls_verify_certificate_externally(X509 *cert, const gchar *custom_peer_certificate_validation)
+/* select wrapper to deal with select returning EINTR on signal delivery */
+int Select(int nfds, fd_set* readfds, fd_set* writefds, fd_set* exceptfds, struct timeval* timeout)
 {
-  gboolean result = FALSE;
-  msg_notice("Triggering external peer certificate validation - ASANTOS");
-  return result;
+  int ret;
+
+  do
+  {
+    ret = select(nfds, readfds, writefds, exceptfds, timeout);
+  }
+  while((ret < 0) && (errno == EINTR));
+
+  return ret;
+}
+
+gboolean tls_verify_certificate_externally(X509 *cert, X509_STORE_CTX *ctx, const gchar *custom_peer_certificate_validation)
+{
+  msg_notice("Triggering external peer certificate validation");
+
+  BIO* bio = NULL;
+  char* pData = NULL;
+  long bytesAvailable = 0;
+  int fd = 0;
+  int errorCode = 0;
+
+  char depth[1] = {0};
+  depth[0] = (char)X509_STORE_CTX_get_error_depth(ctx);
+
+  // Access the raw certificate bytes via a BIO.
+  bio = BIO_new(BIO_s_mem());
+
+  if(!bio)
+  {
+      msg_notice("Could not allocate BIO for peer certificate");
+      return 0;
+  }
+
+  if(PEM_write_bio_X509(bio, cert) <= 0)
+  {
+      msg_notice("Could not extract peer certificate bytes");
+      goto out_error;
+  }
+
+  bytesAvailable = BIO_get_mem_data(bio, &pData);
+
+  if(bytesAvailable <= 0)
+  {
+      msg_notice("Could not access peer certificate bytes");
+      goto out_error;
+  }
+
+  // Call External Validator API for certificate validation.
+  {
+      ssize_t written;
+      struct sockaddr_un addr;
+      char response[1]; // OpenSSL error code, e.g.: X509_V_OK, X509_V_ERR_CERT_REVOKED, etc.
+
+      // SOCK_SEQPACKET notes:
+      // - Connection-oriented socket (like SOCK_STREAM), but preserving message boundaries (like SOCK_DGRAM)
+      // - Reads and writes are atomic (no partial reads or writes)
+      if((fd = socket(AF_UNIX, SOCK_SEQPACKET, 0)) < 0)
+      {
+          msg_notice("Could not create socket to external validator");
+          goto out_error;
+      }
+
+      memset(&addr, 0, sizeof(addr));
+      addr.sun_family = AF_UNIX;
+      strcpy(addr.sun_path, custom_peer_certificate_validation);
+
+      if(connect(fd, (struct sockaddr*)&addr, sizeof(addr)) < 0)
+      {
+          msg_notice("Could not bind socket to external validator");
+          goto sock_error;
+      }
+
+      {
+          // Write socket with timeout.
+          // Currently, waiting for maximum 15 seconds.
+          fd_set wfds;
+          struct timeval timeout = {15, 0};
+          int sel_ret;
+
+          FD_ZERO(&wfds);
+          FD_SET(fd, &wfds);
+
+          sel_ret = Select(fd + 1, NULL, &wfds, NULL, &timeout);
+
+          if(sel_ret < 0)
+          {
+              msg_notice("Error while sending request to external validator");
+              goto sock_error;
+          }
+          else if(sel_ret == 0)
+          {
+              msg_notice("Timeout reached while waiting for external validator");
+              goto sock_error;
+          }
+
+          // Write depth byte first.
+          written = write(fd, depth, 1);
+          if(written <= 0)
+          {
+              msg_notice("Could not write certificate depth to external validator");
+              goto sock_error;
+          }
+
+          written = write(fd, pData, bytesAvailable);
+          if(written <= 0)
+          {
+              msg_notice("Could not write certificate bytes to external validator");
+              goto sock_error;
+          }
+      }
+
+      {
+          // Read socket with timeout.
+          // Currently, waiting for maximum 15 seconds.
+          fd_set rfds;
+          struct timeval timeout = {15, 0};
+          int sel_ret;
+
+          FD_ZERO(&rfds);
+          FD_SET(fd, &rfds);
+          sel_ret = Select(fd + 1, &rfds, NULL, NULL, &timeout);
+
+          if(sel_ret < 0)
+          {
+              msg_notice("Error while waiting for response from external validator");
+              goto sock_error;
+          }
+          else if(sel_ret == 0)
+          {
+              msg_notice("Timeout reached while waiting for external validator");
+              goto sock_error;
+          }
+      }
+
+      if(read(fd, response, sizeof(response)) <= 0)
+      {
+          msg_notice("Error reading response from external validator");
+          goto sock_error;
+      }
+
+      errorCode = (int)response[0];
+
+      if(errorCode != X509_V_OK)
+      {
+          X509_STORE_CTX_set_error(ctx, errorCode);
+          msg_notice("Certificate not accepted", evt_tag_str("error-code", X509_verify_cert_error_string(errorCode)));
+          goto sock_error;
+      }
+  }
+
+msg_notice("Certificate accepted");
+
+close(fd);
+BIO_free(bio);
+
+return TRUE;
+
+sock_error:
+  close(fd); // fall-through
+
+out_error:
+  BIO_free(bio);
+
+  return FALSE;
 }

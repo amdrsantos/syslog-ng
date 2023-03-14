@@ -145,7 +145,7 @@ afinet_dd_verify_callback(gint ok, X509_STORE_CTX *ctx, gpointer user_data)
       ok = tls_verify_certificate_name(cert, self->hostname);
       if (ok && self->tls_context->custom_peer_certificate_validation)
         {
-          ok = tls_verify_certificate_externally(cert, self->tls_context->custom_peer_certificate_validation);
+          ok = tls_verify_certificate_externally(cert, ctx, self->tls_context->custom_peer_certificate_validation);
         }
     }
 
